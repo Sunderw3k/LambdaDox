@@ -3,16 +3,24 @@ package rip.sunrise.lambdadox
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import rip.sunrise.lambdadox.extensions.getFilesFromZip
 import java.io.File
+import java.io.PrintWriter
 
 fun main(args: Array<String>) {
-    if (args.size != 1) {
-        println("Usage: /path/to/target.jar")
+    if (args.size != 2) {
+        println("Usage: /path/to/target.jar /path/to/output/mappings.txt")
         return
     }
+
+    val mapFile = File(args[1]).absoluteFile
+    mapFile.parentFile.mkdirs()
+    mapFile.createNewFile()
+
+    val mapStream = PrintWriter(mapFile.outputStream())
 
     File(args[0]).getFilesFromZip().forEach { (name, bytes) ->
         if (name.endsWith(".class")) {
@@ -22,21 +30,33 @@ fun main(args: Array<String>) {
                 node
             }
 
-            clazz.methods
+            val mappings = clazz.methods
                 .filterNot { it.name.startsWith("lambda") }
                 .filterNot { it.name == "<init>" }
                 .filterNot { it.name == "<clinit>" }
-                .forEach { m ->
+                .mapNotNull { m ->
                     m.instructions
                         .filterIsInstance<InvokeDynamicInsnNode>()
                         .filter { it.bsm.name == "metafactory" }
                         .map { it.bsmArgs[1] as Handle }
                         .firstOrNull { it.name.startsWith("lambda") }
-                        ?.also {
-                            val capturedName = it.name.split("$")[1]
-                            println("${m.name} -> $capturedName")
+                        ?.let {
+                            m to it.name.split("$")[1]
                         }
-                }
+                }.toMutableList()
+            mappings.removeIf { it.first.name == it.second }
+
+            if (mappings.isEmpty()) return@forEach
+
+            val clazzName = clazz.name.replace("/", ".")
+            mapStream.println("$clazzName -> $clazzName:")
+            mappings.forEach { (m, deobfuscated) ->
+                val returnType = Type.getReturnType(m.desc).className
+                val arguments = Type.getArgumentTypes(m.desc).joinToString(",") { it.className }
+                mapStream.println("    $returnType ${m.name}($arguments) -> $deobfuscated")
+            }
         }
     }
+
+    mapStream.close()
 }
